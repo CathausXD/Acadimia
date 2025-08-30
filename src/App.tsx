@@ -2,42 +2,87 @@ import React, { useState, useEffect } from "react"
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts"
 import { Pencil, Trash, X } from "lucide-react"
 import ThemeToggle from "./components/ThemeToggle"
+import { auth, db } from "./firebase" // Import Firestore
+import { onAuthStateChanged, signOut, signInWithEmailAndPassword, createUserWithEmailAndPassword } from "firebase/auth"
+import { collection, addDoc, getDocs, updateDoc, deleteDoc, doc, query, where } from "firebase/firestore" // Firestore imports
 
-type MeasureEntry = { value: string, date: string }
+type MeasureEntry = { id: string, value: string, date: string }
 type MeasuresType = { [part: string]: MeasureEntry[] }
 
-export default function App() {
+export default function App() {     
+  // --------------- Para controlar usuário
+  const [user, setUser] = useState<any>(null)
+  const [email, setEmail] = useState("")
+  const [password, setPassword] = useState("")
+  const [authError, setAuthError] = useState("")
+  
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser)
+      if (currentUser) {
+        fetchWeights(currentUser.uid)
+        fetchMeasures(currentUser.uid)
+      }
+    })
+    return () => unsubscribe()
+  }, [])
+
+  const handleLogin = async () => {
+    try {
+      await signInWithEmailAndPassword(auth, email, password)
+      setAuthError("")
+    } catch (err: any) {
+      setAuthError(err.message)
+    }
+  }
+
+  const handleRegister = async () => {
+    try {
+      await createUserWithEmailAndPassword(auth, email, password)
+      setAuthError("")
+    } catch (err: any) {
+      setAuthError(err.message)
+    }
+  }
+
+  const handleLogout = async () => {
+    await signOut(auth)
+  }
+  
   // ---------------- PESO ----------------
   const [weight, setWeight] = useState("")
   const [date, setDate] = useState(() => new Date().toISOString().split("T")[0])
-  const [weights, setWeights] = useState(() => {
-    const saved = localStorage.getItem("weights")
-    return saved ? JSON.parse(saved) : []
-  })
+  const [weights, setWeights] = useState<any[]>([])
   const [editIndex, setEditIndex] = useState<number | null>(null)
 
-  useEffect(() => {
-    localStorage.setItem("weights", JSON.stringify(weights))
-  }, [weights])
+  const fetchWeights = async (userId: string) => {
+    const weightsRef = collection(db, "weights")
+    const q = query(weightsRef, where("userId", "==", userId))
+    const snapshot = await getDocs(q)
+    const fetchedWeights = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+    setWeights(fetchedWeights)
+  }
 
-  const addWeight = () => {
+  const addWeight = async () => {
     if (!weight) return
-    const newEntry = { date: date || new Date().toLocaleDateString(), value: parseFloat(weight) }
-    setWeights([newEntry, ...weights])
+    const newEntry = { date: date || new Date().toLocaleDateString(), value: parseFloat(weight), userId: user.uid }
+    const docRef = await addDoc(collection(db, "weights"), newEntry)
+    setWeights([{ id: docRef.id, ...newEntry }, ...weights])
     setWeight("")
     setDate(new Date().toISOString().split("T")[0])
   }
 
-  const deleteWeight = (index: number) => {
-    const updated = weights.filter((_, i) => i !== index)
-    setWeights(updated)
+  const deleteWeight = async (id: string) => {
+    await deleteDoc(doc(db, "weights", id))
+    setWeights(weights.filter(w => w.id !== id))
   }
 
-  const saveEdit = () => {
+  const saveEdit = async () => {
     if (editIndex === null || !weight) return
-    const updated = [...weights]
-    updated[editIndex] = { date: date || updated[editIndex].date, value: parseFloat(weight) }
-    setWeights(updated)
+    const updated = { date: date, value: parseFloat(weight) }
+    const weightId = weights[editIndex].id
+    await updateDoc(doc(db, "weights", weightId), updated)
+    setWeights(weights.map((w, i) => (i === editIndex ? { ...w, ...updated } : w)))
     setEditIndex(null)
     setWeight("")
     setDate(new Date().toISOString().split("T")[0])
@@ -47,34 +92,39 @@ export default function App() {
   const [selectedPart, setSelectedPart] = useState("")
   const [measure, setMeasure] = useState("")
   const [measureDate, setMeasureDate] = useState(() => new Date().toISOString().split("T")[0])
-  const [measures, setMeasures] = useState<MeasuresType>(() => {
-    const saved = localStorage.getItem("measures")
-    return saved ? JSON.parse(saved) : {}
-  })
-
-  // Para edição de medida específica
+  const [measures, setMeasures] = useState<MeasuresType>({})
   const [editMeasureIdx, setEditMeasureIdx] = useState<number | null>(null)
   const [editMeasureValue, setEditMeasureValue] = useState("")
   const [editMeasureDate, setEditMeasureDate] = useState("")
 
-  useEffect(() => {
-    localStorage.setItem("measures", JSON.stringify(measures))
-  }, [measures])
+  const fetchMeasures = async (userId: string) => {
+    const measuresRef = collection(db, "measures")
+    const q = query(measuresRef, where("userId", "==", userId))
+    const snapshot = await getDocs(q)
+    const fetchedMeasures: MeasuresType = {}
+    snapshot.docs.forEach(doc => {
+      const data = doc.data()
+      if (!fetchedMeasures[data.part]) fetchedMeasures[data.part] = []
+      fetchedMeasures[data.part].push({ id: doc.id, value: data.value, date: data.date })
+    })
+    setMeasures(fetchedMeasures)
+  }
 
-  // Adiciona nova medida para a parte selecionada
-  const addMeasure = () => {
+  const addMeasure = async () => {
     if (!selectedPart || !measure) return
-    const entry = { value: measure, date: measureDate }
+    const entry = { value: measure, date: measureDate, part: selectedPart, userId: user.uid }
+    const docRef = await addDoc(collection(db, "measures"), entry)
     setMeasures(prev => ({
       ...prev,
-      [selectedPart]: prev[selectedPart] ? [entry, ...prev[selectedPart]] : [entry]
+      [selectedPart]: prev[selectedPart] ? [{ id: docRef.id, ...entry }, ...prev[selectedPart]] : [{ id: docRef.id, ...entry }]
     }))
     setMeasure("")
     setMeasureDate(new Date().toISOString().split("T")[0])
   }
 
-  // Exclui medida específica (por índice)
-  const deleteMeasureEntry = (part: string, idx: number) => {
+  const deleteMeasureEntry = async (part: string, idx: number) => {
+    const measureId = measures[part][idx].id
+    await deleteDoc(doc(db, "measures", measureId))
     setMeasures(prev => {
       const updated = { ...prev }
       updated[part] = updated[part].filter((_, i) => i !== idx)
@@ -83,16 +133,15 @@ export default function App() {
     })
   }
 
-  // Edita medida específica
-  const saveMeasureEdit = () => {
+  const saveMeasureEdit = async () => {
     if (!selectedPart || editMeasureIdx === null || !editMeasureValue || !editMeasureDate) return
+    const measureId = measures[selectedPart][editMeasureIdx].id
+    const updated = { value: editMeasureValue, date: editMeasureDate }
+    await updateDoc(doc(db, "measures", measureId), updated)
     setMeasures(prev => {
-      const updated = { ...prev }
-      updated[selectedPart][editMeasureIdx] = {
-        value: editMeasureValue,
-        date: editMeasureDate
-      }
-      return updated
+      const updatedMeasures = { ...prev }
+      updatedMeasures[selectedPart][editMeasureIdx] = { ...updatedMeasures[selectedPart][editMeasureIdx], ...updated }
+      return updatedMeasures
     })
     setEditMeasureIdx(null)
     setEditMeasureValue("")
@@ -102,13 +151,45 @@ export default function App() {
   // ---------------- UI ----------------
   const [tab, setTab] = useState("peso")
 
+  if (!user) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-screen bg-neutral-950 text-white gap-4">
+        <h1 className="text-3xl font-bold text-[#06b6d4]">Login</h1>
+        <input type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} className="px-4 py-2 rounded-lg bg-neutral-800 border border-zinc-700 w-64 text-white" />
+        <input type="password" placeholder="Senha" value={password} onChange={(e) => setPassword(e.target.value)} className="px-4 py-2 rounded-lg bg-neutral-800 border border-zinc-700 w-64 text-white" />
+        {authError && <span className="text-red-500 text-sm">{authError}</span>}
+        <div className="flex gap-4">
+          <button onClick={handleLogin} className="bg-[#06b6d4] text-black px-6 py-2 rounded-lg font-bold hover:opacity-90 transition">Entrar</button>
+          <button onClick={handleRegister} className="bg-zinc-700 text-white px-6 py-2 rounded-lg font-bold hover:opacity-90 transition">Registrar</button>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="max-w-3xl mx-auto p-6 flex flex-col gap-8 bg-neutral-950 min-h-screen text-white transition-colors">
       {/* Header com botão de tema */}
-      <div className="flex justify-between items-center">
-        <h1 className="text-4xl font-extrabold text-[#06b6d4] drop-shadow-lg"> Acadimia</h1>
-        <ThemeToggle />
-      </div>
+        <div className="flex justify-between items-center">
+  <h1 className="text-4xl font-extrabold text-[#06b6d4] drop-shadow-lg"> Acadimia</h1>
+  <div className="flex gap-4 items-center">
+    <ThemeToggle />
+    <button
+      onClick={async () => {
+        try {
+          await signOut(auth);
+          alert("Deslogado com sucesso!");
+        } catch (err) {
+          console.error(err);
+          alert("Erro ao deslogar");
+        }
+      }}
+      className="bg-red-600 hover:bg-red-500 px-4 py-2 rounded-lg text-white font-bold transition"
+    >
+      Logout
+    </button>
+  </div>
+</div>
+      
 
       {/* Tabs */}
       <div className="flex gap-4 justify-center">
@@ -286,7 +367,7 @@ export default function App() {
               </div>
               <div className="flex gap-2">
                 <button
-                onClick={() => deleteWeight(index)}
+                onClick={() => deleteWeight(entry.id)}
                 className="rounded-full p-2 bg-zinc-900 hover:bg-red-500/20 transition text-red-400 hover:text-red-600 shadow"
                 aria-label="Excluir"
                 >
